@@ -6,6 +6,9 @@ This tool is useful when working with microbial community sequencing data where 
 
 ---
 
+> [!NOTE]
+> This library is still under active development. The vision is to evolve it into a comprehensive toolkit that empowers researchers to cherry-pick the most suitable marker genes from their metagenomic datasets for alpha/beta diversity analyses, essentially bringing 16S amplicon sequencing capabilities to shotgun metagenomics. Future roadmap includes support for additional marker gene profiling tools beyond SingleM, plus enhanced visualization capabilities for downstream analyses. Stay tuned or drop your feature requests! 🧬
+
 ## ✨ Features
 
 * Accepts multiple SingleM OTU tables as input.
