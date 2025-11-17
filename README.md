@@ -4,8 +4,6 @@ MarkerMuse is a Python-based evaluation toolkit designed to identify the best-pe
 
 This tool is useful when working with microbial community sequencing data where SingleM is used to detect marker genes across metagenomic or metatranscriptomic samples.
 
----
-
 > [!NOTE]
 > This library is still under active development. The vision is to evolve it into a comprehensive toolkit that empowers researchers to cherry-pick the most suitable marker genes from their metagenomic datasets for alpha/beta diversity analyses, essentially bringing 16S amplicon sequencing capabilities to shotgun metagenomics. Future roadmap includes support for additional marker gene profiling tools beyond SingleM, plus enhanced visualization capabilities for downstream analyses. Stay tuned or drop your feature requests! 🧬
 
@@ -190,8 +188,6 @@ All metrics are scaled to 0–1 before weighting. The expert mode uses a predefi
 
 In data-driven mode, markers are evaluated based on how well their abundance profiles predict the observed taxonomic profile. A regression is fitted for each marker to the taxonomic-profile coverage across samples, and markers are ranked according to the fitted weights and correlation statistics.
 
----
-
 ## 📝 Example Workflow
 
 1. Run SingleM across all samples with `singlem pipe`.
@@ -200,22 +196,7 @@ In data-driven mode, markers are evaluated based on how well their abundance pro
 4. Run MarkerMuse in your preferred mode.
 5. Select the highest-ranked marker gene for alpha-diversity estimation.
 
----
-
-## 📄 License
-
-MIT License (recommended, but modify as needed for your project).
-
----
-
 ## 🤝 Contributing
 
 Pull requests, suggestions, and issue reports are welcome. Please open an issue if you have ideas for additional scoring metrics or want support for new SingleM output formats.
 
----
-
-## 🙌 Acknowledgements
-
-MarkerMuse was created to support robust alpha-diversity analysis from SingleM results, combining ecological intuition with data-driven modeling.
-
-Happy analyzing! 🎉
