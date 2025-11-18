@@ -7,9 +7,10 @@ Usage examples:
     python markermuse.py --input_folder /path/to/otu_files --otu_suf _singlem.otu.tsv --taxprof _singlem.tax.tsv
 
 Outputs (by default, written to folder `marker_muse_output`):
-    - marker_scores.tsv         : per-marker raw metrics, normalized metrics, score (desc sorted), rank (first column)
-    - marker_scores_heatmap.png : heatmap of normalized metrics across markers
-    - marker_scores_topbar.png  : bar plot of top 20 marker scores
+    - markermuse.tsv                               : per-marker raw metrics, normalized metrics, score (desc sorted), rank (first column)
+    - markermuse_heatmap.png                       : heatmap of normalized metrics across markers
+    - markermuse_topbar.png                        : bar plot of top 20 marker scores
+    - markermuse_best_<MARKER>_otu.tsv             : OTU table for best marker gene (rows=OTUs, columns=samples, values=num_hits); <MARKER> is sanitized marker id
 
 Dependencies: pandas, numpy, scipy
 (install with `pip install pandas numpy scipy`)
@@ -30,6 +31,7 @@ import glob
 import sys
 import math
 import warnings
+import re
 from collections import defaultdict, Counter
 
 import numpy as np
@@ -504,7 +506,7 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
 
 # ------------------------------- plotting -----------------------------------
 
-def make_plots(metrics_df, outprefix='marker_scores'):
+def make_plots(metrics_df, outprefix='markermuse'):
     try:
         import matplotlib.pyplot as plt
     except Exception:
@@ -544,7 +546,7 @@ def main():
     parser.add_argument('--otu_suf', required=True, help='suffix for OTU files (e.g. _singlem.otu.tsv)')
     parser.add_argument('--taxprof', default=None, help='if provided: suffix or path for SingleM taxonomic-profile (_singlem.tax.tsv) to enable data-driven scoring')
     parser.add_argument('--metadata', default=None, help='optional metadata TSV with columns sample and group for discriminability metric')
-    parser.add_argument('--out_prefix', default='marker_scores', help='prefix for output files')
+    parser.add_argument('--out_prefix', default='markermuse', help='prefix for output files')
     parser.add_argument('-o', '--output_folder', default='marker_muse_output', help='folder to write outputs (created if missing)')
     parser.add_argument('--bootstrap_n', type=int, default=100, help='bootstrap replicates for CV estimation')
     parser.add_argument('--rarefaction_reps', type=int, default=5, help='reps per rarefaction depth')
@@ -625,10 +627,30 @@ def main():
         except Exception:
             top_score = top_marker['score']
         print(f"Top marker: {top_marker['marker']} (score={top_score:.4f})")
+        # build OTU table for top marker
+        top_marker_id = top_marker['marker']
+        otus = set()
+        for s in samples:
+            otus.update(marker_sample_otu_counts[top_marker_id].get(s, {}).keys())
+        otus = sorted(otus)
+        if len(otus) == 0:
+            # create empty dataframe with sample columns
+            best_df = pd.DataFrame(columns=samples)
+        else:
+            mat = np.zeros((len(otus), len(samples)), dtype=int)
+            for i, otu in enumerate(otus):
+                for j, s in enumerate(samples):
+                    mat[i, j] = marker_sample_otu_counts[top_marker_id].get(s, {}).get(otu, 0)
+            best_df = pd.DataFrame(mat, index=otus, columns=samples)
+        best_df.index.name = 'OTU'
+        safe_marker = re.sub(r'[^A-Za-z0-9._-]+', '_', str(top_marker_id)) or 'marker'
+        best_path = f"{base_prefix_path}_best_{safe_marker}_otu.tsv"
+        best_df.to_csv(best_path, sep='\t')
+        print(f'Wrote best marker OTU table: {best_path}')
 
     # make plots (heatmap + top bar) using base prefix path
     make_plots(scored, outprefix=base_prefix_path)
-    print('Finished. Plots (if any) written to folder', args.output_folder)
+    print('Finished.')
 
 
 if __name__ == '__main__':

@@ -159,6 +159,10 @@ Barplot of top-scoring markers.
 
 ### 4. **`<output_folder>/<prefix>_fitted_weights.txt`** (data-driven mode only)
 
+### 5. **`<output_folder>/<prefix>_best_<MARKER>_otu.tsv`**
+
+OTU table for the highest-scoring marker gene. `<MARKER>` is the sanitized marker id (non-alphanumeric characters replaced by `_`). Rows are OTU sequences, columns are samples, and each cell is the `num_hits` count. Use this table directly for downstream alpha-diversity based on the chosen marker.
+
 The regression-derived metric weights learned from the taxonomic profile.
 
 ---
