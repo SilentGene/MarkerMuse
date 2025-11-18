@@ -683,6 +683,8 @@ def main():
     # compute scores
     scored = compute_scores(metrics_df.reset_index(), mode=mode)
     # ensure output folder exists
+    if os.path.exists(args.output_folder):
+        print(f'WARNING: Output folder "{args.output_folder}" already exists. Existing files may be overwritten.')
     os.makedirs(args.output_folder, exist_ok=True)
     base_prefix_path = os.path.join(args.output_folder, args.out_prefix)
 

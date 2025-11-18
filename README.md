@@ -186,10 +186,10 @@ for SAMPLE in "${SAMPLES[@]}"; do
     read1="/path/to/${SAMPLE}_R1.fastq.gz"
     read2="/path/to/${SAMPLE}_R2.fastq.gz"
     output_folder="/path/to/output/"
-    singlem pipe -1 $read1 -2 $read2 --threads 8 \
-        --taxonomic-profile $output_folder/"$SAMPLE"_singlem.tax.tsv \
-        --taxonomic-profile-krona $output_folder/"$SAMPLE""_singlem.tax-krona.html" \
-        --otu-table $output_folder/"$SAMPLE"_singlem.otu.tsv
+    singlem pipe -1 "$read1" -2 "$read2" --threads 8 \
+        --taxonomic-profile "${output_folder}${SAMPLE}_singlem.tax.tsv" \
+        --taxonomic-profile-krona "${output_folder}${SAMPLE}_singlem.tax-krona.html" \
+        --otu-table "${output_folder}${SAMPLE}_singlem.otu.tsv"
 done
 ```
 2. Collect OTU tables and (optionally) taxonomic profiles.
