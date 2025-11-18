@@ -5,7 +5,7 @@ MarkerMuse is a Python-based evaluation toolkit designed to identify the best-pe
 This tool is useful when working with microbial community sequencing data where SingleM is used to detect marker genes across metagenomic or metatranscriptomic samples.
 
 > [!NOTE]
-> This library is still under active development. The vision is to evolve it into a comprehensive toolkit that empowers researchers to cherry-pick the most suitable marker genes from their metagenomic datasets for alpha/beta diversity analyses, essentially bringing 16S amplicon sequencing capabilities to shotgun metagenomics. Future roadmap includes support for additional marker gene profiling tools beyond SingleM, plus enhanced visualization capabilities for downstream analyses. Stay tuned or drop your feature requests! 🧬
+> This library is still under development. The vision is to evolve it into a comprehensive toolkit that empowers researchers to cherry-pick the most suitable marker genes from their metagenomic datasets for alpha/beta diversity analyses, essentially bringing 16S amplicon sequencing capabilities to shotgun metagenomics. Future roadmap includes support for additional marker gene profiling tools beyond SingleM, plus enhanced visualization capabilities for downstream analyses. Stay tuned or drop your feature requests! 🧬
 
 ## ✨ Features
 
@@ -213,10 +213,17 @@ for SAMPLE in "${SAMPLES[@]}"; do
         --otu-table "${output_folder}${SAMPLE}_singlem.otu.tsv"
 done
 ```
-2. Collect OTU tables and (optionally) taxonomic profiles.
-3. Prepare metadata if you need group-separation scoring.
-4. Run MarkerMuse in your preferred mode.
-5. Select the highest-ranked marker gene for alpha-diversity estimation.
+2. Prepare metadata if you need group-separation scoring.
+3. Run MarkerMuse in your preferred mode.
+```bash
+# Fitted mode example
+python markermuse.py \
+  --input_folder /path/to/otu_files \
+  --otu_suf _singlem.otu.tsv \
+  --taxprof _singlem.tax.tsv \
+  --output_folder /path/to/marker_muse_output
+```
+4. Select the highest-ranked marker gene for alpha-diversity estimation.
 
 ## 🤝 Contributing
 
