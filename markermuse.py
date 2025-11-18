@@ -29,7 +29,6 @@ import argparse
 import os
 import glob
 import sys
-import math
 import warnings
 import re
 from collections import defaultdict, Counter
@@ -323,6 +322,9 @@ def compute_metrics_for_marker(marker, samples, marker_sample_otu_counts, seq_ta
     if taxprof_df is not None:
         # build taxprof phylum coverage table: rows samples, cols phylum
         taxprof = taxprof_df.copy()
+        # ensure coverage is numeric to avoid string concatenation during aggregation
+        if 'coverage' in taxprof.columns:
+            taxprof['coverage'] = pd.to_numeric(taxprof['coverage'], errors='coerce').fillna(0.0)
         taxprof['phylum'] = taxprof['taxonomy'].apply(extract_phylum)
         # pivot
         tp_pivot = taxprof.pivot_table(index='sample', columns='phylum', values='coverage', aggfunc='sum', fill_value=0)
@@ -354,11 +356,12 @@ def compute_metrics_for_marker(marker, samples, marker_sample_otu_counts, seq_ta
         shared_cols = sorted(set(mp_norm.columns).intersection(set(tp_pivot.columns)))
         if len(shared_cols) >= 1:
             corrs = []
+            skipped_constant = 0
             for s in samples:
                 v1 = mp_norm.loc[s, shared_cols].values.astype(float)
                 v2 = tp_pivot.loc[s, shared_cols].values.astype(float)
-                # require some variance
-                if np.nanstd(v1) == 0 and np.nanstd(v2) == 0:
+                if (np.nanstd(v1) == 0) or (np.nanstd(v2) == 0):
+                    skipped_constant += 1
                     continue
                 try:
                     r, p = spearmanr(v1, v2)
@@ -368,6 +371,9 @@ def compute_metrics_for_marker(marker, samples, marker_sample_otu_counts, seq_ta
                     continue
             if len(corrs) > 0:
                 mean_corr = float(np.mean(corrs))
+            # store diagnostic for optional downstream use
+            taxprof_df.attrs = getattr(taxprof_df, 'attrs', {})
+            taxprof_df.attrs['corr_skipped_constant_samples'] = skipped_constant
 
     metrics = {
         'marker': marker,
@@ -433,75 +439,156 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
         for k, w in expert_weights.items():
             if k in norm.columns:
                 score += w * norm[k].fillna(0).values
+        # guard: replace non-finite with 0
+        score[~np.isfinite(score)] = 0.0
         metrics_df['score'] = score
-        metrics_df['rank'] = metrics_df['score'].rank(method='min', ascending=False).astype(int)
+        # robust ranking: allow NA scores, assign rank only to finite entries
+        score_series = pd.to_numeric(metrics_df['score'], errors='coerce')
+        rank_series = score_series.where(np.isfinite(score_series)).rank(method='min', ascending=False)
+        max_rank = int(rank_series.max()) if not rank_series.isnull().all() else 0
+        rank_series = rank_series.fillna(max_rank + 1)
+        metrics_df['rank'] = rank_series.astype('Int64')
         # attach normalized columns
         for c in use_cols:
             metrics_df[c + '_norm'] = norm[c]
+        # diagnostic note: check for all-same scores
+        unique_scores = metrics_df['score'].nunique()
+        if unique_scores == 1:
+            metrics_df['diagnostic_note'] = 'all_scores_identical_no_discrimination'
+            warnings.warn('All markers have identical scores in expert mode. No discrimination possible with current metrics.')
+        else:
+            metrics_df['diagnostic_note'] = ''
         return metrics_df
 
-    # data-driven mode: we will attempt to fit a linear model predicting mean_corr_taxprof using other metrics as features
-    # target: mean_corr_taxprof if available
+    # data-driven mode: attempt robust linear model predicting mean_corr_taxprof using other metrics
     df = metrics_df.copy()
     features = ['F_group', 'cv_shannon', 'mean_richness', 'slope_rarefaction', 'singleton_rate', 'presence_rate']
-    X = df[features].astype(float).fillna(df[features].astype(float).mean())
+    # build feature matrix and impute
+    X_raw = df[features].astype(float)
+    col_means = X_raw.mean()
+    dropped_features = []
+    for col in X_raw.columns:
+        if X_raw[col].isnull().all():
+            # all NaN -> drop by setting to 0 (no influence) and record
+            X_raw[col] = 0.0
+            dropped_features.append(col)
+        else:
+            X_raw[col] = X_raw[col].fillna(col_means[col])
+    X = X_raw
+    if dropped_features:
+        warnings.warn(f'Dropped all-NaN features in data-driven mode: {", ".join(dropped_features)}')
     y = df['mean_corr_taxprof'].astype(float)
     valid = ~y.isnull()
-    if valid.sum() < 3:
+    n_valid = int(valid.sum())
+    if n_valid < 3:
         warnings.warn('Not enough markers with taxprof correlation to fit data-driven weights; falling back to expert weights')
         return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
-    # normalize X
+    # normalize X (feature scaling)
     Xn = X.copy()
     for col in Xn.columns:
         Xn[col] = normalize_series_minmax(Xn[col])
-    # fit least squares
+    Xmat = np.asarray(Xn[valid])
+    yvec = np.asarray(y[valid])
+    # add intercept column
+    X_with_const = np.column_stack([np.ones(Xmat.shape[0]), Xmat])
+    # diagnostics
+    diagnostics = {
+        'n_valid_markers': n_valid
+    }
     try:
-        Xmat = np.asarray(Xn[valid])
-        yvec = np.asarray(y[valid])
-        # add intercept
-        X_with_const = np.column_stack([np.ones(Xmat.shape[0]), Xmat])
-        coef, *_ = np.linalg.lstsq(X_with_const, yvec, rcond=None)
-        intercept = coef[0]
-        coefs = coef[1:]
-        # absolute value of coefficients as importance, normalized to sum 1
-        w_raw = np.abs(coefs)
-        if w_raw.sum() == 0:
-            warnings.warn('Fitted coefficients are zero; falling back to expert weights')
-            return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
-        w_norm = w_raw / float(w_raw.sum())
-        # map weights back to metric names
-        fitted_weights = dict(zip(features, w_norm))
-        # we also include mean_corr_taxprof as target-correspondence weight to prefer markers with high correlation
-        # give it some weight proportional to how well target is explained (R^2)
-        # compute R^2
-        y_pred = X_with_const.dot(coef)
-        ss_res = float(((yvec - y_pred) ** 2).sum())
-        ss_tot = float(((yvec - yvec.mean()) ** 2).sum())
-        r2 = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-        # assign combined weights: features according to fitted, plus mean_corr_taxprof gets r2 fraction
-        feature_total = 1.0 - r2
-        final_weights = {}
-        for k, v in fitted_weights.items():
-            final_weights[k] = v * feature_total
-        final_weights['mean_corr_taxprof'] = r2
-        # ensure presence_rate included; if not assigned (it was in features) ok
-        # now compute score using normalized metrics
-        score = np.zeros(len(df))
-        for k, w in final_weights.items():
-            if k in norm.columns:
-                score += w * norm[k].fillna(0).values
-        df['score'] = score
-        df['rank'] = df['score'].rank(method='min', ascending=False).astype(int)
-        # attach normalized columns
-        for c in use_cols:
-            df[c + '_norm'] = norm[c]
-        # also attach final_weights for reference
-        df.attrs = getattr(df, 'attrs', {})
-        df.attrs['fitted_weights'] = final_weights
-        return df
+        cond = np.linalg.cond(X_with_const)
+    except Exception:
+        cond = np.inf
+    diagnostics['condition_number'] = float(cond)
+    use_ridge = False
+    # threshold for ill-conditioning
+    if not np.isfinite(cond) or cond > 1e8:
+        use_ridge = True
+        diagnostics['reason'] = 'ill_conditioned_matrix'
+    coef = None
+    method_used = 'ols'
+    try:
+        if not use_ridge:
+            coef, *_ = np.linalg.lstsq(X_with_const, yvec, rcond=None)
+        else:
+            # ridge fallback
+            method_used = 'ridge'
+            XtX = X_with_const.T.dot(X_with_const)
+            # adaptive alpha: small fraction of trace
+            alpha = 1e-3 * (np.trace(XtX) / XtX.shape[0])
+            ridge_mat = XtX + alpha * np.eye(XtX.shape[0])
+            try:
+                coef = np.linalg.solve(ridge_mat, X_with_const.T.dot(yvec))
+            except Exception:
+                # final fallback: regular lstsq even if previously flagged
+                coef, *_ = np.linalg.lstsq(X_with_const, yvec, rcond=None)
+                method_used = 'ols_fallback'
+            diagnostics['ridge_alpha'] = float(alpha)
     except Exception as e:
-        warnings.warn(f'Failed fitting data-driven model: {e}; falling back to expert weights')
+        # try ridge if OLS failed
+        if method_used == 'ols':
+            try:
+                method_used = 'ridge_after_error'
+                XtX = X_with_const.T.dot(X_with_const)
+                alpha = 1e-2 * (np.trace(XtX) / XtX.shape[0])
+                ridge_mat = XtX + alpha * np.eye(XtX.shape[0])
+                coef = np.linalg.solve(ridge_mat, X_with_const.T.dot(yvec))
+                diagnostics['ridge_alpha'] = float(alpha)
+            except Exception as e2:
+                warnings.warn(f'Failed fitting data-driven model (ridge also failed: {e2}); falling back to expert weights')
+                return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+        else:
+            warnings.warn(f'Failed fitting data-driven model: {e}; falling back to expert weights')
+            return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+    if coef is None:
+        warnings.warn('No coefficients obtained; falling back to expert weights')
         return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+    intercept = coef[0]
+    coefs = coef[1:]
+    w_raw = np.abs(coefs)
+    if (not np.isfinite(w_raw).all()) or (not np.isfinite(w_raw.sum())) or w_raw.sum() == 0:
+        warnings.warn('Fitted coefficients invalid or zero; falling back to expert weights')
+        return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+    w_norm = w_raw / float(w_raw.sum())
+    fitted_weights = dict(zip(features, w_norm))
+    # predictions & R2
+    y_pred = X_with_const.dot(coef)
+    ss_res = float(((yvec - y_pred) ** 2).sum())
+    ss_tot = float(((yvec - yvec.mean()) ** 2).sum())
+    r2 = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+    diagnostics['method'] = method_used
+    diagnostics['r2'] = float(r2)
+    diagnostics['intercept'] = float(intercept)
+    diagnostics['dropped_all_nan_features'] = dropped_features
+    # combined weights: (1 - r2) distributed among features + r2 for correlation metric
+    feature_total = 1.0 - r2
+    final_weights = {k: v * feature_total for k, v in fitted_weights.items()}
+    final_weights['mean_corr_taxprof'] = r2
+    score = np.zeros(len(df))
+    for k, w in final_weights.items():
+        if k in norm.columns:
+            score += w * norm[k].fillna(0).values
+    # guard score non-finite -> 0
+    score[~np.isfinite(score)] = 0.0
+    df['score'] = score
+    score_series = pd.to_numeric(df['score'], errors='coerce')
+    rank_series = score_series.where(np.isfinite(score_series)).rank(method='min', ascending=False)
+    max_rank = int(rank_series.max()) if not rank_series.isnull().all() else 0
+    rank_series = rank_series.fillna(max_rank + 1)
+    df['rank'] = rank_series.astype('Int64')
+    for c in use_cols:
+        df[c + '_norm'] = norm[c]
+    # diagnostic note
+    unique_scores = df['score'].nunique()
+    if unique_scores == 1:
+        df['diagnostic_note'] = 'all_scores_identical_no_discrimination'
+        warnings.warn('All markers have identical scores in data-driven mode. Model could not discriminate based on current data.')
+    else:
+        df['diagnostic_note'] = ''
+    df.attrs = getattr(df, 'attrs', {})
+    df.attrs['fitted_weights'] = final_weights
+    df.attrs['regression_diagnostics'] = diagnostics
+    return df
 
 
 # ------------------------------- plotting -----------------------------------
@@ -607,6 +694,14 @@ def main():
             for k, v in fitted.items():
                 fh.write(f"{k}\t{v}\n")
         print(f'Wrote fitted weights: {weights_path}')
+        # write diagnostics if available
+        if 'regression_diagnostics' in scored.attrs:
+            diag = scored.attrs['regression_diagnostics']
+            diag_path = base_prefix_path + '_regression_diagnostics.txt'
+            with open(diag_path, 'w') as fh:
+                for k, v in diag.items():
+                    fh.write(f"{k}\t{v}\n")
+            print(f'Wrote regression diagnostics: {diag_path}')
     # sort by score descending and reorder columns to place rank first
     if 'score' in scored.columns:
         scored = scored.sort_values('score', ascending=False).reset_index(drop=True)
@@ -627,6 +722,11 @@ def main():
         except Exception:
             top_score = top_marker['score']
         print(f"Top marker: {top_marker['marker']} (score={top_score:.4f})")
+        # check if all scores are identical
+        if 'diagnostic_note' in scored.columns:
+            if (scored['diagnostic_note'] == 'all_scores_identical_no_discrimination').any():
+                print("WARNING: All markers have identical scores. The program could not determine the best marker based on available data.")
+                print("Consider: providing metadata with groups, ensuring taxprof has sufficient coverage variation, or using a different dataset.")
         # build OTU table for top marker
         top_marker_id = top_marker['marker']
         otus = set()
