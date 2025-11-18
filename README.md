@@ -77,31 +77,31 @@ Clone or download this repository, and run the script directly.
 
 ## 🧪 Usage
 
-### Basic usage (expert preset mode)
+### Basic usage (expert mode auto-selected)
+
+If you do not supply a taxonomic profile (`--taxprof`), the script auto-selects expert heuristic scoring:
 
 ```bash
-python marker_muse.py \
-    --input_folder /path/to/otu_files \
-    --otu_suf _singlem.otu.tsv \
-    --mode expert
+python markermuse.py \
+  --input_folder /path/to/otu_files \
+  --otu_suf _singlem.otu.tsv
 ```
 
-### Data-driven mode
+### Data-driven mode (auto-selected when `--taxprof` provided)
 
-Requires `--taxprof`:
+Provide a taxonomic profile to enable data-driven scoring:
 
 ```bash
-python marker_muse.py \
-    --input_folder /path/to/otu_files \
-    --otu_suf _singlem.otu.tsv \
-    --mode data-driven \
-    --taxprof _singlem.tax.tsv
+python markermuse.py \
+  --input_folder /path/to/otu_files \
+  --otu_suf _singlem.otu.tsv \
+  --taxprof _singlem.tax.tsv
 ```
 
 ### With metadata
 
 ```bash
-python marker_muse.py \
+python markermuse.py \
     --input_folder otu/ \
     --otu_suf _singlem.otu.tsv \
     --mode expert \
@@ -112,10 +112,13 @@ python marker_muse.py \
 
 | Argument             | Description                                          |
 | -------------------- | ---------------------------------------------------- |
-| `--out_prefix`       | Output file prefix (default: `marker_scores`)        |
+| `--out_prefix`       | Output file prefix inside output folder (default: `marker_scores`) |
+| `-o`, `--output_folder` | Output directory (default: `marker_muse_output`, auto-created) |
 | `--bootstrap_n`      | Number of bootstrap replicates for stability scoring |
 | `--rarefaction_reps` | Rarefaction resampling repetitions                   |
-| `--verbose`          | Print additional logs                                |
+| `--taxprof`          | Suffix or path to SingleM taxonomic-profile (enables data-driven mode) |
+| `--metadata`         | Metadata TSV with `sample` & `group` for group ANOVA |
+| `--min_markers_for_fit` | Minimum markers with taxprof to attempt regression |
 
 ---
 
@@ -123,9 +126,9 @@ python marker_muse.py \
 
 MarkerMuse generates the following outputs:
 
-### 1. **`<prefix>.csv`**
+### 1. **`<output_folder>/<prefix>.tsv`**
 
-Comprehensive marker scoring table including the following columns:
+Comprehensive tab-separated marker scoring table (sorted descending by `score`; `rank` is first column) written into the specified output folder. Columns include:
 
 * `n_samples`: Number of samples in which the marker is detected
 * `n_otus`: Total OTUs detected for the marker
@@ -146,15 +149,15 @@ Comprehensive marker scoring table including the following columns:
 * `slope_rarefaction_norm`: Normalized rarefaction slope
 * `singleton_rate_norm`: Normalized singleton rate
 
-### 2. **`<prefix>_heatmap.png`**
+### 2. **`<output_folder>/<prefix>_heatmap.png`**
 
 Heatmap of normalized marker metrics.
 
-### 3. **`<prefix>_topbar.png`**
+### 3. **`<output_folder>/<prefix>_topbar.png`**
 
 Barplot of top-scoring markers.
 
-### 4. **`<prefix>_fitted_weights.txt`** (data-driven mode only)
+### 4. **`<output_folder>/<prefix>_fitted_weights.txt`** (data-driven mode only)
 
 The regression-derived metric weights learned from the taxonomic profile.
 
@@ -162,31 +165,13 @@ The regression-derived metric weights learned from the taxonomic profile.
 
 ## 📐 Scoring Overview
 
-### Expert Mode Scoring Formula
+### Expert Mode (auto-selected)
 
-In expert preset mode, the final marker score is computed as a weighted sum of normalized metrics:
+Expert mode uses predefined weights combining normalized metrics (correlation to taxprof, group discriminability, richness, presence rate, singleton rate inversion, rarefaction slope inversion, and Shannon CV inversion). Lower-is-better metrics are inverted after min–max normalization.
 
-```
-final_score = w_shannon * shannon_norm
-             + w_evenness * evenness_norm
-             + w_richness * richness_norm
-             + w_stability * stability_norm
-             + w_coverage * coverage_norm
-```
+### Data-driven Mode (auto-selected when `--taxprof` provided)
 
-Where:
-
-* **shannon_norm**: Normalized Shannon diversity
-* **evenness_norm**: Normalized Pielou’s evenness
-* **richness_norm**: Normalized OTU richness
-* **stability_norm**: Normalized cross-sample stability (CV / bootstrap)
-* **coverage_norm**: Normalized marker coverage consistency
-
-All metrics are scaled to 0–1 before weighting. The expert mode uses a predefined set of weights based on ecological heuristics.
-
-### Data-driven Mode
-
-In data-driven mode, markers are evaluated based on how well their abundance profiles predict the observed taxonomic profile. A regression is fitted for each marker to the taxonomic-profile coverage across samples, and markers are ranked according to the fitted weights and correlation statistics.
+Data-driven mode fits a regression using available metrics to predict the taxonomic-profile correlation and derives weights proportional to coefficient magnitudes and model R². The final score is a weighted sum of normalized (and inverted where appropriate) metrics; the strongest predictive metrics and correlation receive higher weights.
 
 ## 📝 Example Workflow
 
@@ -198,5 +183,5 @@ In data-driven mode, markers are evaluated based on how well their abundance pro
 
 ## 🤝 Contributing
 
-Pull requests, suggestions, and issue reports are welcome. Please open an issue if you have ideas for additional scoring metrics or want support for new SingleM output formats.
+Pull requests, suggestions, and issue reports are welcome. Please open an issue if you have ideas for additional scoring metrics or want support for other input/output formats.
 

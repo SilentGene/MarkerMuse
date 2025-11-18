@@ -3,13 +3,13 @@
 MarkerMuse: select best SingleM marker(s) for alpha-diversity calculation.
 
 Usage examples:
-  python markermuse.py --input_folder /path/to/otu_files --otu_suf _singlem.otu.tsv --mode expert
-  python markermuse.py --input_folder /path/to/otu_files --otu_suf _singlem.otu.tsv --mode data-driven --taxprof _singlem.tax.tsv
+    python markermuse.py --input_folder /path/to/otu_files --otu_suf _singlem.otu.tsv
+    python markermuse.py --input_folder /path/to/otu_files --otu_suf _singlem.otu.tsv --taxprof _singlem.tax.tsv
 
-Outputs (by default, written to working directory):
-  - marker_scores.csv         : per-marker raw metrics, normalized metrics, score, rank
-  - marker_scores_heatmap.png : heatmap of normalized metrics across markers
-  - top_markers_bar.png       : bar plot of top 20 marker scores
+Outputs (by default, written to folder `marker_muse_output`):
+    - marker_scores.tsv         : per-marker raw metrics, normalized metrics, score (desc sorted), rank (first column)
+    - marker_scores_heatmap.png : heatmap of normalized metrics across markers
+    - marker_scores_topbar.png  : bar plot of top 20 marker scores
 
 Dependencies: pandas, numpy, scipy
 (install with `pip install pandas numpy scipy`)
@@ -540,12 +540,12 @@ def make_plots(metrics_df, outprefix='marker_scores'):
 
 def main():
     parser = argparse.ArgumentParser(description='MarkerMuse: select best SingleM marker(s) for alpha diversity')
-    parser.add_argument('--input_folder', required=True, help='folder with SingleM OTU files (per-sample), tab-separated')
+    parser.add_argument('-i', '--input_folder', required=True, help='folder with SingleM OTU files (per-sample), tab-separated')
     parser.add_argument('--otu_suf', required=True, help='suffix for OTU files (e.g. _singlem.otu.tsv)')
-    parser.add_argument('--mode', choices=['expert', 'data-driven'], default='expert', help='scoring mode')
-    parser.add_argument('--taxprof', default=None, help='if data-driven mode: suffix or path for SingleM taxonomic-profile (_singlem.tax.tsv)')
+    parser.add_argument('--taxprof', default=None, help='if provided: suffix or path for SingleM taxonomic-profile (_singlem.tax.tsv) to enable data-driven scoring')
     parser.add_argument('--metadata', default=None, help='optional metadata TSV with columns sample and group for discriminability metric')
     parser.add_argument('--out_prefix', default='marker_scores', help='prefix for output files')
+    parser.add_argument('-o', '--output_folder', default='marker_muse_output', help='folder to write outputs (created if missing)')
     parser.add_argument('--bootstrap_n', type=int, default=100, help='bootstrap replicates for CV estimation')
     parser.add_argument('--rarefaction_reps', type=int, default=5, help='reps per rarefaction depth')
     parser.add_argument('--min_markers_for_fit', type=int, default=4, help='min markers with taxprof to attempt data-driven fit')
@@ -554,17 +554,16 @@ def main():
     markers, samples, marker_sample_otu_counts, seq_taxonomy = parse_otu_files(args.input_folder, args.otu_suf)
     print(f'Found {len(markers)} markers and {len(samples)} samples')
 
+    # auto-select mode based on presence of --taxprof
+    mode = 'data-driven' if args.taxprof is not None else 'expert'
     taxprof_df = None
-    if args.mode == 'data-driven':
-        if args.taxprof is None:
-            parser.error('data-driven mode requires --taxprof')
+    if mode == 'data-driven':
         # taxprof can be a suffix pattern contained in input_folder, or a file path
         candidate = os.path.join(args.input_folder, f"*{args.taxprof}")
         matched = sorted(glob.glob(candidate))
         if len(matched) == 1:
             taxprof_df = safe_read_tsv(matched[0])
         elif len(matched) > 1:
-            # concat
             dfs = [safe_read_tsv(p) for p in matched]
             taxprof_df = pd.concat(dfs, axis=0, ignore_index=True)
         elif os.path.exists(args.taxprof):
@@ -593,22 +592,43 @@ def main():
     metrics_df = pd.DataFrame(all_metrics).set_index('marker')
 
     # compute scores
-    scored = compute_scores(metrics_df.reset_index(), mode=args.mode)
+    scored = compute_scores(metrics_df.reset_index(), mode=mode)
+    # ensure output folder exists
+    os.makedirs(args.output_folder, exist_ok=True)
+    base_prefix_path = os.path.join(args.output_folder, args.out_prefix)
+
     # if data-driven and fitted weights exist, save them
-    if args.mode == 'data-driven' and hasattr(scored, 'attrs') and 'fitted_weights' in scored.attrs:
+    if mode == 'data-driven' and hasattr(scored, 'attrs') and 'fitted_weights' in scored.attrs:
         fitted = scored.attrs['fitted_weights']
-        with open(args.out_prefix + '_fitted_weights.txt', 'w') as fh:
+        weights_path = base_prefix_path + '_fitted_weights.txt'
+        with open(weights_path, 'w') as fh:
             for k, v in fitted.items():
                 fh.write(f"{k}\t{v}\n")
+        print(f'Wrote fitted weights: {weights_path}')
+    # sort by score descending and reorder columns to place rank first
+    if 'score' in scored.columns:
+        scored = scored.sort_values('score', ascending=False).reset_index(drop=True)
+    if 'rank' in scored.columns:
+        ordered_cols = ['rank'] + [c for c in scored.columns if c != 'rank']
+        scored = scored[ordered_cols]
 
-    # save outputs
-    out_csv = args.out_prefix + '.csv'
-    scored.to_csv(out_csv, index=False)
-    print(f'Wrote {out_csv}')
+    # save outputs as TSV instead of CSV per user request
+    out_tsv = base_prefix_path + '.tsv'
+    scored.to_csv(out_tsv, sep='\t', index=False)
+    print(f'Wrote {out_tsv}')
 
-    # make plots
-    make_plots(scored, outprefix=args.out_prefix)
-    print('Finished. Plots (if any) written with prefix', args.out_prefix)
+    # print top marker information
+    if len(scored) > 0 and 'marker' in scored.columns and 'score' in scored.columns:
+        top_marker = scored.iloc[0]
+        try:
+            top_score = float(top_marker['score'])
+        except Exception:
+            top_score = top_marker['score']
+        print(f"Top marker: {top_marker['marker']} (score={top_score:.4f})")
+
+    # make plots (heatmap + top bar) using base prefix path
+    make_plots(scored, outprefix=base_prefix_path)
+    print('Finished. Plots (if any) written to folder', args.output_folder)
 
 
 if __name__ == '__main__':
