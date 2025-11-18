@@ -18,10 +18,10 @@ Dependencies: pandas, numpy, scipy
 Notes:
  - Input: folder containing per-sample SingleM OTU TSVs (tab-separated) whose filenames end with the provided suffix.
  - Each OTU TSV must contain columns: gene, sample, sequence, num_hits, coverage, taxonomy
- - In data-driven mode, the taxonomic-profile (taxprof) file produced by SingleM is required. That file must be tab-separated and contain columns: sample, coverage, taxonomy.
+ - In fitted mode, the taxonomic-profile (taxprof) file produced by SingleM is required. That file must be tab-separated and contain columns: sample, coverage, taxonomy.
  - Optional: provide --metadata <meta.tsv> with columns at least: sample, group to enable group-discrimination metric (ANOVA F on Shannon).
 
-Algorithm implemented (brief): parse all OTU files -> build per-marker sample x OTU count matrices -> compute per-sample alpha (richness, Shannon, Simpson) -> compute per-marker metrics (mean richness, presence_rate, singleton_rate, bootstrap CV of Shannon, rarefaction slope, discriminability if groups provided, and representativeness vs taxprof if provided) -> normalize metrics -> compute score via weighted sum (expert preset or data-driven weights fitted to predict taxprof representativeness) -> output ranked markers + plots
+Algorithm implemented (brief): parse all OTU files -> build per-marker sample x OTU count matrices -> compute per-sample alpha (richness, Shannon, Simpson) -> compute per-marker metrics (mean richness, presence_rate, singleton_rate, bootstrap CV of Shannon, rarefaction slope, discriminability if groups provided, and representativeness vs taxprof if provided) -> normalize metrics -> compute score via weighted sum (weighted preset or fitted weights fitted to predict taxprof representativeness) -> output ranked markers + plots
 
 """
 
@@ -401,13 +401,20 @@ def normalize_series_minmax(s):
     return (s - mn) / (mx - mn)
 
 
-def compute_scores(metrics_df, mode='expert', expert_weights=None):
-    # metrics_df: DataFrame with columns including the metric names
-    # define which metrics we will use
-    # metrics where higher is better: mean_corr_taxprof, F_group, presence_rate, mean_richness
-    # metrics where lower is better: cv_shannon, slope_rarefaction, singleton_rate
+def compute_scores(metrics_df, mode='weighted', weighted_weights=None):
+    """Compute marker scores.
 
-    use_cols = ['mean_corr_taxprof', 'F_group', 'presence_rate', 'mean_richness', 'cv_shannon', 'slope_rarefaction', 'singleton_rate']
+    Parameters
+    ----------
+    metrics_df : DataFrame
+        Per-marker metrics (must include 'marker').
+    mode : str
+        'weighted' uses external YAML weights; 'fitted' derives weights via regression.
+    weighted_weights : dict or None
+        If provided, overrides loaded YAML weights for weighted mode.
+    """
+    use_cols = ['mean_corr_taxprof', 'F_group', 'presence_rate', 'mean_richness',
+                'cv_shannon', 'slope_rarefaction', 'singleton_rate']
     for c in use_cols:
         if c not in metrics_df.columns:
             metrics_df[c] = np.nan
@@ -421,9 +428,10 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
         if c in norm.columns:
             norm[c] = 1.0 - norm[c]
 
-    # default expert weights
-    if expert_weights is None:
-        expert_weights = {
+    # Weighted mode scoring
+    if mode == 'weighted':
+        # fallback internal defaults if none supplied
+        internal_default = {
             'mean_corr_taxprof': 0.30,
             'F_group': 0.20,
             'cv_shannon': 0.15,
@@ -432,35 +440,39 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
             'singleton_rate': 0.10,
             'presence_rate': 0.05
         }
-
-    if mode == 'expert':
-        # compute weighted sum
+        weights = weighted_weights if isinstance(weighted_weights, dict) and weighted_weights else internal_default
+        # normalize weights to sum 1
+        w_vals = np.array([weights.get(k, 0.0) for k in weights.keys()], dtype=float)
+        if w_vals.sum() <= 0 or not np.isfinite(w_vals).all():
+            warnings.warn('Provided weights invalid; using internal defaults.')
+            weights = internal_default
+            w_vals = np.array(list(internal_default.values()), dtype=float)
+        weights = {k: float(v) / float(w_vals.sum()) for k, v in weights.items()}
         score = np.zeros(len(norm))
-        for k, w in expert_weights.items():
+        for k, w in weights.items():
             if k in norm.columns:
                 score += w * norm[k].fillna(0).values
-        # guard: replace non-finite with 0
         score[~np.isfinite(score)] = 0.0
         metrics_df['score'] = score
-        # robust ranking: allow NA scores, assign rank only to finite entries
+        # ranking
         score_series = pd.to_numeric(metrics_df['score'], errors='coerce')
         rank_series = score_series.where(np.isfinite(score_series)).rank(method='min', ascending=False)
         max_rank = int(rank_series.max()) if not rank_series.isnull().all() else 0
         rank_series = rank_series.fillna(max_rank + 1)
         metrics_df['rank'] = rank_series.astype('Int64')
-        # attach normalized columns
         for c in use_cols:
             metrics_df[c + '_norm'] = norm[c]
-        # diagnostic note: check for all-same scores
         unique_scores = metrics_df['score'].nunique()
         if unique_scores == 1:
             metrics_df['diagnostic_note'] = 'all_scores_identical_no_discrimination'
-            warnings.warn('All markers have identical scores in expert mode. No discrimination possible with current metrics.')
+            warnings.warn('All markers have identical scores in weighted mode. No discrimination possible with current metrics.')
         else:
             metrics_df['diagnostic_note'] = ''
+        metrics_df.attrs = getattr(metrics_df, 'attrs', {})
+        metrics_df.attrs['used_weights'] = weights
         return metrics_df
 
-    # data-driven mode: attempt robust linear model predicting mean_corr_taxprof using other metrics
+    # Fitted mode scoring (regression)
     df = metrics_df.copy()
     features = ['F_group', 'cv_shannon', 'mean_richness', 'slope_rarefaction', 'singleton_rate', 'presence_rate']
     # build feature matrix and impute
@@ -476,13 +488,13 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
             X_raw[col] = X_raw[col].fillna(col_means[col])
     X = X_raw
     if dropped_features:
-        warnings.warn(f'Dropped all-NaN features in data-driven mode: {", ".join(dropped_features)}')
+        warnings.warn(f'Dropped all-NaN features in fitted mode: {", ".join(dropped_features)}')
     y = df['mean_corr_taxprof'].astype(float)
     valid = ~y.isnull()
     n_valid = int(valid.sum())
     if n_valid < 3:
-        warnings.warn('Not enough markers with taxprof correlation to fit data-driven weights; falling back to expert weights')
-        return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+        warnings.warn('Not enough markers with taxprof correlation to fit fitted weights; falling back to weighted weights')
+        return compute_scores(metrics_df, mode='weighted', weighted_weights=weighted_weights)
     # normalize X (feature scaling)
     Xn = X.copy()
     for col in Xn.columns:
@@ -535,20 +547,20 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
                 coef = np.linalg.solve(ridge_mat, X_with_const.T.dot(yvec))
                 diagnostics['ridge_alpha'] = float(alpha)
             except Exception as e2:
-                warnings.warn(f'Failed fitting data-driven model (ridge also failed: {e2}); falling back to expert weights')
-                return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+                warnings.warn(f'Failed fitting fitted model (ridge also failed: {e2}); falling back to weighted weights')
+                return compute_scores(metrics_df, mode='weighted', weighted_weights=weighted_weights)
         else:
-            warnings.warn(f'Failed fitting data-driven model: {e}; falling back to expert weights')
-            return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+            warnings.warn(f'Failed fitting fitted model: {e}; falling back to weighted weights')
+            return compute_scores(metrics_df, mode='weighted', weighted_weights=weighted_weights)
     if coef is None:
-        warnings.warn('No coefficients obtained; falling back to expert weights')
-        return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+        warnings.warn('No coefficients obtained; falling back to weighted weights')
+        return compute_scores(metrics_df, mode='weighted', weighted_weights=weighted_weights)
     intercept = coef[0]
     coefs = coef[1:]
     w_raw = np.abs(coefs)
     if (not np.isfinite(w_raw).all()) or (not np.isfinite(w_raw.sum())) or w_raw.sum() == 0:
-        warnings.warn('Fitted coefficients invalid or zero; falling back to expert weights')
-        return compute_scores(metrics_df, mode='expert', expert_weights=expert_weights)
+        warnings.warn('Fitted coefficients invalid or zero; falling back to weighted weights')
+        return compute_scores(metrics_df, mode='weighted', weighted_weights=weighted_weights)
     w_norm = w_raw / float(w_raw.sum())
     fitted_weights = dict(zip(features, w_norm))
     # predictions & R2
@@ -582,7 +594,7 @@ def compute_scores(metrics_df, mode='expert', expert_weights=None):
     unique_scores = df['score'].nunique()
     if unique_scores == 1:
         df['diagnostic_note'] = 'all_scores_identical_no_discrimination'
-        warnings.warn('All markers have identical scores in data-driven mode. Model could not discriminate based on current data.')
+        warnings.warn('All markers have identical scores in fitted mode. Model could not discriminate based on current data.')
     else:
         df['diagnostic_note'] = ''
     df.attrs = getattr(df, 'attrs', {})
@@ -638,15 +650,16 @@ def main():
     parser.add_argument('--bootstrap_n', type=int, default=100, help='bootstrap replicates for CV estimation')
     parser.add_argument('--rarefaction_reps', type=int, default=5, help='reps per rarefaction depth')
     parser.add_argument('--min_markers_for_fit', type=int, default=4, help='min markers with taxprof to attempt data-driven fit')
+    parser.add_argument('--weights', default=None, help='optional YAML file with metric weights for weighted mode')
     args = parser.parse_args()
 
     markers, samples, marker_sample_otu_counts, seq_taxonomy = parse_otu_files(args.input_folder, args.otu_suf)
     print(f'Found {len(markers)} markers and {len(samples)} samples')
 
     # auto-select mode based on presence of --taxprof
-    mode = 'data-driven' if args.taxprof is not None else 'expert'
+    mode = 'fitted' if args.taxprof is not None else 'weighted'
     taxprof_df = None
-    if mode == 'data-driven':
+    if mode == 'fitted':
         # taxprof can be a suffix pattern contained in input_folder, or a file path
         candidate = os.path.join(args.input_folder, f"*{args.taxprof}")
         matched = sorted(glob.glob(candidate))
@@ -681,15 +694,60 @@ def main():
     metrics_df = pd.DataFrame(all_metrics).set_index('marker')
 
     # compute scores
-    scored = compute_scores(metrics_df.reset_index(), mode=mode)
+    # load external weights if in weighted mode
+    external_weights = None
+    if mode == 'weighted':
+        # precedence: --weights path > local weights.yaml
+        if args.weights is not None:
+            weights_path = args.weights
+        else:
+            weights_path = os.path.join(os.path.dirname(__file__), 'weights.yaml')
+        if os.path.exists(weights_path):
+            try:
+                # Try PyYAML first
+                try:
+                    import yaml
+                    with open(weights_path, 'r', encoding='utf-8') as fh:
+                        data = yaml.safe_load(fh)
+                except Exception:
+                    # Manual simple key: value parser fallback
+                    data = {}
+                    with open(weights_path, 'r', encoding='utf-8') as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line or line.startswith('#'):
+                                continue
+                            if ':' in line:
+                                k, v = line.split(':', 1)
+                                try:
+                                    data[k.strip()] = float(v.strip())
+                                except Exception:
+                                    pass
+                # validate
+                if isinstance(data, dict) and data:
+                    # keep only expected keys
+                    expected = ['mean_corr_taxprof','F_group','cv_shannon','mean_richness','slope_rarefaction','singleton_rate','presence_rate']
+                    external_weights = {k: float(data[k]) for k in expected if k in data}
+                    if not external_weights:
+                        print('WARNING: weights.yaml has no recognized keys; using internal defaults.')
+                    else:
+                        print(f'Loaded weights from {weights_path}:', external_weights)
+                else:
+                    print('WARNING: weights.yaml content invalid; using internal defaults.')
+            except Exception as e:
+                print(f'WARNING: Failed reading weights file ({weights_path}) ({e}); using internal defaults.')
+        else:
+            if args.weights is not None:
+                print(f'WARNING: Specified weights file not found: {weights_path}. Using internal defaults.')
+    scored = compute_scores(metrics_df.reset_index(), mode=mode, weighted_weights=external_weights)
     # ensure output folder exists
     if os.path.exists(args.output_folder):
         print(f'WARNING: Output folder "{args.output_folder}" already exists. Existing files may be overwritten.')
     os.makedirs(args.output_folder, exist_ok=True)
     base_prefix_path = os.path.join(args.output_folder, args.out_prefix)
 
-    # if data-driven and fitted weights exist, save them
-    if mode == 'data-driven' and hasattr(scored, 'attrs') and 'fitted_weights' in scored.attrs:
+    # if fitted and fitted weights exist, save them
+    if mode == 'fitted' and hasattr(scored, 'attrs') and 'fitted_weights' in scored.attrs:
         fitted = scored.attrs['fitted_weights']
         weights_path = base_prefix_path + '_fitted_weights.txt'
         with open(weights_path, 'w') as fh:
@@ -710,6 +768,11 @@ def main():
     if 'rank' in scored.columns:
         ordered_cols = ['rank'] + [c for c in scored.columns if c != 'rank']
         scored = scored[ordered_cols]
+
+    # reposition score column to be second last (before diagnostic_note) per user request
+    if 'score' in scored.columns and 'diagnostic_note' in scored.columns:
+        other_cols = [c for c in scored.columns if c not in ['score', 'diagnostic_note']]
+        scored = scored[other_cols + ['score', 'diagnostic_note']]
 
     # save outputs as TSV instead of CSV per user request
     out_tsv = base_prefix_path + '.tsv'

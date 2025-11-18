@@ -1,0 +1,9 @@
+# Default metric weights for weighted mode in MarkerMuse
+# Edit these values to customize scoring. Values should sum to ~1.0 but program will normalize if not.
+mean_corr_taxprof: 0.30
+F_group: 0.20
+cv_shannon: 0.15
+mean_richness: 0.10
+slope_rarefaction: 0.10
+singleton_rate: 0.10
+presence_rate: 0.05
